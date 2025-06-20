@@ -2,6 +2,7 @@
 import os
 import hashlib
 import traceback
+import contextvars
 import aiofiles
 import aiofiles.os
 from shutil import copyfileobj
@@ -24,6 +25,27 @@ from functools import lru_cache
 
 from app.config import logger, vector_store, RAG_UPLOAD_DIR, CHUNK_SIZE, CHUNK_OVERLAP
 from app.constants import ERROR_MESSAGES
+
+def context_aware_run_in_executor(executor, func, *args, **kwargs):
+    """Run function in executor while preserving context variables"""
+    # Capture current context
+    ctx = contextvars.copy_context()
+    
+    # Create a wrapper that runs the function with the captured context
+    def wrapper():
+        return func(*args, **kwargs)
+    
+    # Run the wrapper in the captured context within the executor
+    return run_in_executor(executor, ctx.run, wrapper)
+
+def get_trace_logger(request: Request):
+    """Get a logger function that includes trace ID"""
+    trace_id = getattr(request.state, 'trace_id', 'unknown')
+    # Use first 8 chars for readability
+    short_trace_id = trace_id[:8] if trace_id != 'unknown' else 'unknown'
+    def log_with_trace(level, message, *args, **kwargs):
+        getattr(logger, level)(f"[{short_trace_id}] {message}", *args, **kwargs)
+    return log_with_trace
 from app.models import (
     StoreDocument,
     QueryRequestBody,
@@ -154,7 +176,10 @@ async def delete_documents(request: Request, document_ids: List[str] = Body(...)
 # Cache the embedding function with LRU cache
 @lru_cache(maxsize=128)
 def get_cached_query_embedding(query: str):
-    return vector_store.embedding_function.embed_query(query)
+    logger.info(f"Generating embedding for query (length: {len(query)} chars, cached: {get_cached_query_embedding.cache_info().hits > 0})")
+    embedding = vector_store.embedding_function.embed_query(query)
+    logger.info(f"Embedding generated successfully (vector size: {len(embedding)})")
+    return embedding
 
 
 @router.post("/query")
@@ -172,9 +197,12 @@ async def query_embeddings_by_file_id(
     authorized_documents = []
 
     try:
+        trace_id = getattr(request.state, 'trace_id', 'unknown')[:8]
+        logger.info(f"[{trace_id}] Processing query for file_id: {body.file_id}, k: {body.k}, user: {user_authorized}")
         embedding = get_cached_query_embedding(body.query)
 
         if isinstance(vector_store, AsyncPgVector):
+            logger.info(f"[{trace_id}] Performing async similarity search for file_id: {body.file_id}")
             documents = await vector_store.asimilarity_search_with_score_by_vector(
                 embedding,
                 k=body.k,
@@ -186,10 +214,14 @@ async def query_embeddings_by_file_id(
                 embedding, k=body.k, filter={"file_id": body.file_id}
             )
 
+        logger.info(f"[{trace_id}] Similarity search returned {len(documents)} documents for file_id: {body.file_id}")
+        
         if not documents:
+            logger.info(f"[{trace_id}] No documents found for file_id: {body.file_id}")
             return authorized_documents
 
         document, score = documents[0]
+        logger.info(f"[{trace_id}] Top result score: {score:.4f} for file_id: {body.file_id}")
         doc_metadata = document.metadata
         doc_user_id = doc_metadata.get("user_id")
 
@@ -272,6 +304,8 @@ async def store_data_in_vector_db(
     ]
 
     try:
+        logger.info(f"Storing {len(docs)} document chunks for file_id: {file_id}, user_id: {user_id}")
+        
         if isinstance(vector_store, AsyncPgVector):
             ids = await vector_store.aadd_documents(
                 docs, ids=[file_id] * len(documents), executor=executor
@@ -279,6 +313,7 @@ async def store_data_in_vector_db(
         else:
             ids = vector_store.add_documents(docs, ids=[file_id] * len(documents))
 
+        logger.info(f"Successfully stored {len(docs)} document chunks with {len(ids)} embeddings generated")
         return {"message": "Documents added successfully", "ids": ids}
 
     except Exception as e:
@@ -312,7 +347,7 @@ async def embed_local_file(
         loader, known_type, file_ext = get_loader(
             document.filename, document.file_content_type, document.filepath
         )
-        data = await run_in_executor(request.app.state.thread_pool, loader.load)
+        data = await context_aware_run_in_executor(request.app.state.thread_pool, loader.load)
         result = await store_data_in_vector_db(
             data, document.file_id, user_id, clean_content=file_ext == "pdf", executor=request.app.state.thread_pool
         )
@@ -390,7 +425,7 @@ async def embed_file(
         loader, known_type, file_ext = get_loader(
             file.filename, file.content_type, temp_file_path
         )
-        data = await run_in_executor(request.app.state.thread_pool, loader.load)
+        data = await context_aware_run_in_executor(request.app.state.thread_pool, loader.load)
         result = await store_data_in_vector_db(
             data=data, file_id=file_id, user_id=user_id, clean_content=file_ext == "pdf", executor=request.app.state.thread_pool
         )
@@ -525,7 +560,7 @@ async def embed_file_upload(
             uploaded_file.filename, uploaded_file.content_type, temp_file_path
         )
 
-        data = await run_in_executor(request.app.state.thread_pool, loader.load)
+        data = await context_aware_run_in_executor(request.app.state.thread_pool, loader.load)
         result = await store_data_in_vector_db(
             data, file_id, user_id, clean_content=file_ext == "pdf", executor=request.app.state.thread_pool
         )

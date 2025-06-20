@@ -1,8 +1,21 @@
 from typing import Optional, List, Tuple, Dict, Any
 import asyncio
+import contextvars
 from langchain_core.documents import Document
 from langchain_core.runnables.config import run_in_executor
 from .extended_pg_vector import ExtendedPgVector
+
+def context_aware_run_in_executor(executor, func, *args, **kwargs):
+    """Run function in executor while preserving context variables"""
+    # Capture current context
+    ctx = contextvars.copy_context()
+    
+    # Create a wrapper that runs the function with the captured context
+    def wrapper():
+        return func(*args, **kwargs)
+    
+    # Run the wrapper in the captured context within the executor
+    return run_in_executor(executor, ctx.run, wrapper)
 
 class AsyncPgVector(ExtendedPgVector):
     def __init__(self, *args, **kwargs):
@@ -24,21 +37,21 @@ class AsyncPgVector(ExtendedPgVector):
     
     async def get_all_ids(self, executor=None) -> list[str]:
         executor = executor or self._get_thread_pool()
-        return await run_in_executor(executor, super().get_all_ids)
+        return await context_aware_run_in_executor(executor, super().get_all_ids)
     
     async def get_filtered_ids(self, ids: list[str], executor=None) -> list[str]:
         executor = executor or self._get_thread_pool()
-        return await run_in_executor(executor, super().get_filtered_ids, ids)
+        return await context_aware_run_in_executor(executor, super().get_filtered_ids, ids)
 
     async def get_documents_by_ids(self, ids: list[str], executor=None) -> list[Document]:
         executor = executor or self._get_thread_pool()
-        return await run_in_executor(executor, super().get_documents_by_ids, ids)
+        return await context_aware_run_in_executor(executor, super().get_documents_by_ids, ids)
 
     async def delete(
         self, ids: Optional[list[str]] = None, collection_only: bool = False, executor=None
     ) -> None:
         executor = executor or self._get_thread_pool()
-        await run_in_executor(executor, self._delete_multiple, ids, collection_only)
+        await context_aware_run_in_executor(executor, self._delete_multiple, ids, collection_only)
     
     async def asimilarity_search_with_score_by_vector(
         self, 
@@ -49,7 +62,7 @@ class AsyncPgVector(ExtendedPgVector):
     ) -> List[Tuple[Document, float]]:
         """Async version of similarity_search_with_score_by_vector"""
         executor = executor or self._get_thread_pool()
-        return await run_in_executor(
+        return await context_aware_run_in_executor(
             executor, 
             super().similarity_search_with_score_by_vector, 
             embedding, 
@@ -66,7 +79,7 @@ class AsyncPgVector(ExtendedPgVector):
     ) -> List[str]:
         """Async version of add_documents"""
         executor = executor or self._get_thread_pool()
-        return await run_in_executor(
+        return await context_aware_run_in_executor(
             executor, 
             super().add_documents, 
             documents, 

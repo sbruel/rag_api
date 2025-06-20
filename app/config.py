@@ -104,6 +104,15 @@ if console_json:
 
             json_record["message"] = record.getMessage()
 
+            # Add trace ID if available
+            try:
+                from app.middleware import trace_id_var
+                trace_id = trace_id_var.get(None)
+                if trace_id:
+                    json_record["trace_id"] = trace_id
+            except:
+                pass
+
             if HTTP_REQ in record.__dict__:
                 json_record[HTTP_REQ] = record.__dict__[HTTP_REQ]
 
@@ -128,8 +137,23 @@ if console_json:
 
     formatter = JsonFormatter()
 else:
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    class TraceFormatter(logging.Formatter):
+        def format(self, record):
+            # Add trace ID to the record
+            try:
+                from app.middleware import trace_id_var
+                trace_id = trace_id_var.get(None)
+                if trace_id:
+                    # Show only first 8 chars for readability in console logs
+                    record.trace_id = trace_id[:8]
+                else:
+                    record.trace_id = "--------"
+            except:
+                record.trace_id = "--------"
+            return super().format(record)
+    
+    formatter = TraceFormatter(
+        "%(asctime)s [%(trace_id)s] - %(name)s - %(levelname)s - %(message)s"
     )
 
 handler = logging.StreamHandler()  # or logging.FileHandler("app.log")
@@ -146,10 +170,13 @@ class LogMiddleware(BaseHTTPMiddleware):
         if str(request.url).endswith("/health"):
             logger_method = logger.debug
 
+        # Get trace ID from request state if available
+        trace_id = getattr(request.state, 'trace_id', 'unknown')
+        
         logger_method(
             f"Request {request.method} {request.url} - {response.status_code}",
             extra={
-                HTTP_REQ: {"method": request.method, "url": str(request.url)},
+                HTTP_REQ: {"method": request.method, "url": str(request.url), "trace_id": trace_id},
                 HTTP_RES: {"status_code": response.status_code},
             },
         )
@@ -158,6 +185,11 @@ class LogMiddleware(BaseHTTPMiddleware):
 
 
 logging.getLogger("uvicorn.access").disabled = True
+
+# Configure httpx to use our custom formatter
+httpx_logger = logging.getLogger("httpx")
+httpx_logger.setLevel(logging.INFO)
+# httpx already uses the root logger's handlers, so it will pick up our formatter
 
 ## Credentials
 

@@ -11,7 +11,7 @@ from starlette.responses import JSONResponse
 
 from app.config import VectorDBType, debug_mode, RAG_HOST, RAG_PORT, CHUNK_SIZE, CHUNK_OVERLAP, PDF_EXTRACT_IMAGES, VECTOR_DB_TYPE, \
     LogMiddleware, logger
-from app.middleware import security_middleware
+from app.middleware import security_middleware, correlation_middleware
 from app.routes import document_routes, pgvector_routes
 from app.services.database import PSQLDatabase, ensure_custom_id_index_on_embedding
 
@@ -46,6 +46,7 @@ app.add_middleware(
 
 app.add_middleware(LogMiddleware)
 
+app.middleware("http")(correlation_middleware)
 app.middleware("http")(security_middleware)
 
 # Set state variables for use in routes
